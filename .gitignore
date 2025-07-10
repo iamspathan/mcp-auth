@@ -1,0 +1,39 @@
+# Python virtual environments
+.venv/
+venv/
+V/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variable files
+.env
+.env.*
+.uenv
+.uenv.*
+EV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+
+# Test and coverage outputs
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Log files
+*.log
+
+# Ignore local config
+*.local

@@ -1,3 +1,6 @@
+# --- Dynamic Client Registration Endpoint (RFC7591) ---
+from flask import jsonify, make_response
+import json
 # demo_oidc.py
 
 from flask import Flask, request, render_template_string, redirect
@@ -205,6 +208,27 @@ login_page = """
   <button type="submit">Continue</button>
 </form>
 """
+@app.route("/register", methods=["POST"])
+def dynamic_client_registration():
+    data = request.get_json(force=True)
+    client_id = data.get("client_name", "demo-client") + "-id"
+    CLIENTS[client_id] = {
+        "client_id": client_id,
+        "redirect_uris": data.get("redirect_uris", []),
+        "scope": data.get("scope", "openid email"),
+        "token_endpoint_auth_method": data.get("token_endpoint_auth_method", "none"),
+    }
+    body = {
+        "client_id": client_id,
+        "redirect_uris": data.get("redirect_uris", []),
+        "scope": data.get("scope", "openid email"),
+        "token_endpoint_auth_method": data.get("token_endpoint_auth_method", "none"),
+    }
+    response = make_response(json.dumps(body), 201)
+    response.headers["Content-Type"] = "application/json"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 @app.route("/auth", methods=["GET", "POST"])
 def authorize():
@@ -225,13 +249,13 @@ def issue_token():
     print("Request form:", dict(request.form))
     print("Request data:", request.data)
     resp = auth_server.create_token_response()
-    # Patch: replace access_token with id_token in the response body
     if resp.status_code == 200 and resp.is_json:
         data = resp.get_json()
         if "id_token" in data:
             data["access_token"] = data["id_token"]
             import json as _json
             resp.set_data(_json.dumps(data))
+        print("Token response:", data)  # <-- Add this line
     return resp
 
 @app.route("/userinfo")

@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+python-jose
+PyJWT
+requests
+httpx
+mcp  # Replace with the actual MCP SDK package name if different
+mcp[cli]
+flask
+authlib
