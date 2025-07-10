@@ -37,3 +37,10 @@ htmlcov/
 
 # Ignore local config
 *.local
+.venv/
+EV/
+V/
+__pycache__/
+*.pyc
+.env
+.uenv
