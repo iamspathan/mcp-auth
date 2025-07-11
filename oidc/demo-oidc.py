@@ -47,7 +47,7 @@ class MyOpenIDCode(OpenIDCode):
             "key": app.config["SECRET_KEY"],
             "alg": "HS256",
             "iss": "http://localhost:4000",
-            "aud": "http://localhost:5000",
+            "aud": "http://localhost:5001",
         }
 
 class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
@@ -64,7 +64,7 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
             "key": app.config["SECRET_KEY"],
             "alg": "HS256",
             "iss": "http://localhost:4000",
-            "aud": "http://localhost:5000",
+            "aud": "http://localhost:5001",
         }
     def save_authorization_code(self, code, request):
         # store code → (client_id, redirect_uri, scope, user)

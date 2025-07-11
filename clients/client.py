@@ -1,4 +1,4 @@
-# --- Modern MCP Client using SDK (streamable HTTP + OAuth) ---
+# --- Modern MCP Client using SDK (stdio + OAuth) ---
 import asyncio
 import httpx
 import os
@@ -10,10 +10,13 @@ from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+import requests
+import argparse
 
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.stdio import stdio_client
+from mcp import StdioServerParameters
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
 
@@ -88,59 +91,22 @@ class CallbackServer:
 
 
 class SimpleMCPClient:
-    def __init__(self, server_url: str):
-        self.server_url = server_url
+    def __init__(self, server_command: str = "python3 run_server_stdio.py"):
+        self.server_command = server_command
         self.session: ClientSession | None = None
 
     async def connect(self):
-        print(f"Connecting to MCP server at {self.server_url}")
-        callback_server = CallbackServer(port=8765)
-        callback_server.start()
-
-        async def callback_handler() -> tuple[str, str | None]:
-            print("Waiting for OAuth callback...")
-            try:
-                auth_code = callback_server.wait_for_callback(timeout=300)
-                return auth_code, callback_server.get_state()
-            finally:
-                callback_server.stop()
-
-        client_metadata_dict = {
-            "client_id": "foo",
-            "redirect_uris": ["http://localhost:8765/callback"],
-        }
-
-        # Pre-populate storage with static client info to prevent registration
-        storage = InMemoryTokenStorage()
-        from mcp.shared.auth import OAuthClientInformationFull
-        storage.client_info = OAuthClientInformationFull(
-            client_id="foo",
-            client_secret=None,
-            redirect_uris=["http://localhost:8765/callback"],
-            scope="openid email",
-            token_endpoint_auth_method="none",
+        print(f"Connecting to MCP server using command: {self.server_command}")
+        
+        # Set up server parameters for stdio connection
+        server_params = StdioServerParameters(
+            command="python3",
+            args=["run_server_stdio.py"],
+            env=None,
         )
 
-        async def _default_redirect_handler(authorization_url: str) -> None:
-            print(f"Opening browser for authorization: {authorization_url}")
-            webbrowser.open(authorization_url)
-
-        oauth_auth = OAuthClientProvider(
-            server_url="http://localhost:4000",
-            client_metadata=OAuthClientMetadata.model_validate(client_metadata_dict),
-            storage=storage,
-            redirect_handler=_default_redirect_handler,
-            callback_handler=callback_handler,
-            # issuer_url="http://localhost:4000",
-            # authorization_server_metadata_url="http://localhost:4000/.well-known/oauth-authorization-server",
-        )
-
-        # Use streamable HTTP transport
-        async with streamablehttp_client(
-            url=self.server_url,
-            auth=oauth_auth,
-            timeout=timedelta(seconds=60),
-        ) as (read_stream, write_stream, _):
+        # Use stdio client to connect to the local server
+        async with stdio_client(server_params) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 self.session = session
                 print("Session initialized!\n")
@@ -211,19 +177,100 @@ class SimpleMCPClient:
                         print(content)
             else:
                 print(result)
-        except httpx.HTTPStatusError as e:
-            print("→ Request JSON:", e.request.content.decode())
-            print("→ Response status:", e.response.status_code)
-            print("→ Response body:", e.response.text)
-            raise
         except Exception as e:
             print(f"Failed to call tool '{tool_name}': {e}")
 
 
+def ollama_chat(messages, model="llama3.1:latest"):
+    url = "http://localhost:11434/api/chat"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False
+    }
+    response = requests.post(url, json=payload)
+    response.raise_for_status()
+    return response.json()["message"]["content"]
+
+
+def format_tools_for_llm(tools):
+    """Format the list of tools and their schemas for the LLM prompt."""
+    lines = []
+    for tool in tools.tools:
+        lines.append(f"Tool: {tool.name}")
+        if hasattr(tool, 'description') and tool.description:
+            lines.append(f"  Description: {tool.description}")
+        if hasattr(tool, 'inputSchema'):
+            lines.append(f"  Input schema: {json.dumps(getattr(tool, 'inputSchema', {}), indent=2)}")
+    return '\n'.join(lines)
+
+async def llm_agent_loop(session, model="llama3.1:latest"):
+    print("\nLLM Agent Mode. Type your request, or 'quit' to exit.")
+    conversation = []
+    while True:
+        user_input = input("You: ").strip()
+        if user_input.lower() == "quit":
+            break
+        # 1. List available tools
+        tools = await session.list_tools()
+        tool_names = [tool.name for tool in tools.tools]
+        tool_info = format_tools_for_llm(tools)
+        # 2. Build LLM prompt
+        prompt = f"""
+You are an AI assistant that can call the following tools by replying with:
+call <tool_name> <json_args>
+Otherwise, reply directly to the user.
+
+Available tools:
+{tool_info}
+
+User: {user_input}
+"""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that can call tools via MCP."},
+            {"role": "user", "content": prompt}
+        ]
+        llm_reply = ollama_chat(messages, model=model)
+        print(f"LLM: {llm_reply}")
+        if llm_reply.strip().startswith("call "):
+            try:
+                # Parse: call <tool_name> <json_args>
+                parts = llm_reply.strip().split(None, 2)
+                tool_name = parts[1]
+                arguments = {}
+                if len(parts) > 2:
+                    arguments = json.loads(parts[2])
+                print(f"[Agent] Calling tool '{tool_name}' with arguments: {arguments}")
+                result = await session.call_tool(tool_name, arguments)
+                print(f"[Tool Result]: {result}")
+                # Optionally, feed result back to LLM for multi-turn reasoning
+                # conversation.append({"role": "assistant", "content": llm_reply})
+                # conversation.append({"role": "tool", "content": json.dumps(result)})
+            except Exception as e:
+                print(f"[Agent] Failed to parse or call tool: {e}")
+        else:
+            # Just a direct reply
+            continue
+
 if __name__ == "__main__":
-    if len(sys.argv) < 3 or sys.argv[1] != "http":
-        print("Usage: python client.py http <mcp_url>")
-        sys.exit(1)
-    mcp_url = sys.argv[2]
-    client = SimpleMCPClient(mcp_url)
-    asyncio.run(client.connect())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--llm", action="store_true", help="Run in LLM agent mode (Ollama)")
+    args = parser.parse_args()
+
+    client = SimpleMCPClient()
+    if args.llm:
+        async def run_llm():
+            print("Connecting to MCP server using command: python3 run_server_stdio.py")
+            server_params = StdioServerParameters(
+                command="python3",
+                args=["run_server_stdio.py"],
+                env=None,
+            )
+            async with stdio_client(server_params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    print("Session initialized!\n")
+                    await session.initialize()
+                    await llm_agent_loop(session)
+        asyncio.run(run_llm())
+    else:
+        asyncio.run(client.connect())

@@ -1,6 +1,13 @@
-from .oauth_tools import set_aps_status_with_oauth
+from .oauth_tools import (
+    generate_authorization_url,
+    get_bearer_token,
+    call_resource_api,
+    complete_oauth_flow
+)
 
 TOOLS = [
-    set_aps_status_with_oauth,
-    # ...other tools
+    generate_authorization_url,
+    get_bearer_token,
+    call_resource_api,
+    complete_oauth_flow,
 ]

@@ -14,11 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
-from pydantic import BaseModel
+from pydantic import BaseModel, AnyHttpUrl
 
-RESOURCE_METADATA_URL = "http://localhost:5000/.well-known/oauth-protected-resource"
+RESOURCE_METADATA_URL = "http://localhost:5001/.well-known/oauth-protected-resource"
 AUTH_SERVER_METADATA_URL = "http://localhost:4000/.well-known/oauth-authorization-server"
-CANONICAL_RESOURCE = "foo"  # Set to client_id to match OIDC token audience
+CANONICAL_RESOURCE = "http://localhost:5001"  # Match the OIDC server's audience
 
 # --- FastAPI app ---
 app = FastAPI(title="MCP Resource Server", version="1.0")
@@ -34,8 +34,6 @@ app.add_middleware(
 # --- Custom TokenVerifier using local JWT decode (for demo) ---
 import jwt
 PUBLIC_KEYS = ["dev-secret-key"]  # Replace with your real public keys or JWKS
-
-token_verifier = None
 
 class LocalJWTTokenVerifier(TokenVerifier):
     async def verify_token(self, token: str):
@@ -59,11 +57,8 @@ mcp = FastMCP(
     app=app,
     token_verifier=token_verifier,
     auth=AuthSettings(
-        resource=CANONICAL_RESOURCE,
-        resource_metadata_url=RESOURCE_METADATA_URL,
-        authorization_server_metadata_url=AUTH_SERVER_METADATA_URL,
-        issuer_url="http://localhost:4000",
-        resource_server_url="http://localhost:5000",
+        issuer_url=AnyHttpUrl("http://localhost:4000"),
+        resource_server_url=AnyHttpUrl("http://localhost:5001"),
     ),
 )
 
@@ -99,37 +94,136 @@ async def get_token_info(request: Request):
         })
 
 # --- MCP tool registration (for LLM/stdio use) ---
+from server.tools.oauth_tools import (
+    generate_authorization_url, 
+    get_bearer_token, 
+    call_resource_api, 
+    complete_oauth_flow
+)
+
 @mcp.tool()
-async def call_mcp_with_access_token(
-    access_token: str,
-    query: str,
-    resource_url: str = "http://localhost:5000/mcp"
+async def echo_query(query: str) -> dict:
+    """
+    Echo back the provided query with a simple response.
+    Args:
+        query: The query to echo back.
+    Returns:
+        A simple response containing the query.
+    """
+    return {"message": f"Echo: {query}", "status": "success"}
+
+@mcp.tool()
+async def generate_oauth_url(
+    auth_server: str = "http://localhost:4000",
+    client_id: str = "foo",
+    redirect_uri: str = "http://localhost:8765/callback",
+    scope: str = "openid"
 ) -> dict:
     """
-    Call the MCP API with a provided Bearer access token and query.
+    Generate an OAuth authorization URL for the user to visit.
     Args:
-        access_token: The JWT access token obtained from OIDC server.
-        query: The query to send to the MCP API.
-        resource_url: The MCP API endpoint (default: http://localhost:5000/mcp)
+        auth_server: The OAuth server URL (default: http://localhost:4000)
+        client_id: The OAuth client ID (default: client1)
+        redirect_uri: The redirect URI for the callback (default: http://localhost:8765/callback)
+        scope: The OAuth scope (default: openid)
     Returns:
-        The API response as a dict, or error message.
+        The authorization URL and instructions.
     """
-    import requests
+    auth_url = generate_authorization_url(auth_server, client_id, redirect_uri, scope)
+    return {
+        "authorization_url": auth_url,
+        "instructions": "Visit this URL in your browser to authorize the application. After authorization, you'll be redirected to a callback URL.",
+        "auth_server": auth_server,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": scope
+    }
+
+@mcp.tool()
+async def exchange_code_for_token(
+    auth_server: str = "http://localhost:4000",
+    client_id: str = "foo",
+    client_secret: str = "",
+    code: str = "",
+    redirect_uri: str = "http://localhost:8765/callback"
+) -> dict:
+    """
+    Exchange an authorization code for an access token.
+    Args:
+        auth_server: The OAuth server URL (default: http://localhost:4000)
+        client_id: The OAuth client ID (default: client1)
+        client_secret: The OAuth client secret (default: client1-secret)
+        code: The authorization code from the OAuth callback
+        redirect_uri: The redirect URI used in the authorization (default: http://localhost:8765/callback)
+    Returns:
+        The access token and related information.
+    """
+    if not code:
+        return {"error": "Authorization code is required"}
+    
     try:
-        headers = {"Authorization": f"Bearer {access_token}"}
-        data = {"query": query}
-        resp = requests.post(resource_url, json=data, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        token_response = get_bearer_token(auth_server, client_id, client_secret, code, redirect_uri)
+        return {
+            "success": True,
+            "access_token": token_response.get("access_token"),
+            "token_type": token_response.get("token_type"),
+            "expires_in": token_response.get("expires_in"),
+            "refresh_token": token_response.get("refresh_token"),
+            "scope": token_response.get("scope")
+        }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Token exchange failed: {str(e)}"}
+
+@mcp.tool()
+async def call_protected_resource(
+    resource_url: str,
+    access_token: str
+) -> dict:
+    """
+    Call a protected resource API using a bearer token.
+    Args:
+        resource_url: The URL of the protected resource to call
+        access_token: The OAuth access token
+    Returns:
+        The response from the protected resource.
+    """
+    try:
+        result = call_resource_api(resource_url, access_token)
+        return {
+            "success": True,
+            "resource_url": resource_url,
+            "response": result
+        }
+    except Exception as e:
+        return {"error": f"Resource call failed: {str(e)}"}
+
+@mcp.tool()
+async def complete_oauth_flow_automated(
+    auth_server: str = "http://localhost:4000",
+    client_id: str = "foo",
+    client_secret: str = "",
+    redirect_uri: str = "http://localhost:8765/callback",
+    scope: str = "openid"
+) -> dict:
+    """
+    Complete the entire OAuth flow automatically (opens browser, handles callback, exchanges token).
+    Args:
+        auth_server: The OAuth server URL (default: http://localhost:4000)
+        client_id: The OAuth client ID (default: client1)
+        client_secret: The OAuth client secret (default: client1-secret)
+        redirect_uri: The redirect URI for the callback (default: http://localhost:8765/callback)
+        scope: The OAuth scope (default: openid)
+    Returns:
+        The complete OAuth flow result with access token.
+    """
+    return complete_oauth_flow(auth_server, client_id, client_secret, redirect_uri, scope)
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "http":
         import uvicorn
-        print("MCP HTTP server running on port 5000...")
-        uvicorn.run("server.terminal_server:app", host="0.0.0.0", port=5000, reload=True)
+        print("MCP HTTP server running on port 5001...")
+        uvicorn.run("server.terminal_server:app", host="0.0.0.0", port=5001, reload=True)
     else:
         print("MCP server started and waiting for requests (STDIO)...")
         mcp.run(transport="stdio")
