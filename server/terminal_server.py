@@ -176,14 +176,14 @@ async def exchange_code_for_token(
 
 @mcp.tool()
 async def call_protected_resource(
-    resource_url: str,
-    access_token: str
+    access_token: str,
+    resource_url: str = "http://localhost:4000/protected"
 ) -> dict:
     """
-    Call a protected resource API using a bearer token.
+    Call the protected resource API (OIDC demo server) using a bearer token.
     Args:
-        resource_url: The URL of the protected resource to call
         access_token: The OAuth access token
+        resource_url: The URL of the protected resource to call (default: http://localhost:4000/protected)
     Returns:
         The response from the protected resource.
     """
@@ -203,10 +203,11 @@ async def complete_oauth_flow_automated(
     client_id: str = "foo",
     client_secret: str = "",
     redirect_uri: str = "http://localhost:8765/callback",
-    scope: str = "openid"
+    scope: str = "email openid"
 ) -> dict:
     """
-    Complete the entire OAuth flow automatically (opens browser, handles callback, exchanges token).
+    Complete the entire OAuth flow automatically (opens browser, handles callback, exchanges token),
+    then call the protected resource endpoint using the obtained access token.
     Args:
         auth_server: The OAuth server URL (default: http://localhost:4000)
         client_id: The OAuth client ID (default: client1)
@@ -214,9 +215,18 @@ async def complete_oauth_flow_automated(
         redirect_uri: The redirect URI for the callback (default: http://localhost:8765/callback)
         scope: The OAuth scope (default: openid)
     Returns:
-        The complete OAuth flow result with access token.
+        The complete OAuth flow result with access token and protected resource response.
     """
-    return complete_oauth_flow(auth_server, client_id, client_secret, redirect_uri, scope)
+    flow_result = complete_oauth_flow(auth_server, client_id, client_secret, redirect_uri, scope)
+    access_token = flow_result.get("access_token")
+    protected_response = None
+    if access_token:
+        # Call the protected resource endpoint using the access token
+        protected_response = call_resource_api("http://localhost:4000/protected", access_token)
+    return {
+        "oauth_flow_result": flow_result,
+        "protected_resource_response": protected_response
+    }
 
 
 if __name__ == "__main__":

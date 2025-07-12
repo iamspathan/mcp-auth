@@ -268,5 +268,15 @@ def userinfo():
     user = data["user"]
     return UserInfo(sub=user.user_id, email=user.email)
 
+# --- Protected resource endpoint ---
+@app.route("/protected")
+def protected():
+    token = request.headers.get("Authorization", "").split()[-1]
+    data = TOKENS.get(token)
+    if not data or "openid" not in data.get("scope", ""):
+        return {"error": "invalid_token"}, 401
+    user = data["user"]
+    return {"message": "This is a protected resource!", "user": user.email}
+
 if __name__ == "__main__":
     app.run(port=4000)
